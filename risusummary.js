@@ -511,7 +511,7 @@
     var updateInfo = await getUpdateInfo();
     var updateBannerHtml = '';
     if (updateInfo) {
-      updateBannerHtml = '<div class="rs-update-banner" id="rs-update-banner">UPDATE: v' + escapeHtml(updateInfo.current) + ' -> v' + escapeHtml(updateInfo.version) + ' <span class="rs-update-close" id="rs-update-dismiss">x</span></div>';
+      updateBannerHtml = '<div class="rs-update-banner" id="rs-update-banner">UPDATE: v' + escapeHtml(updateInfo.current) + ' -> v' + escapeHtml(updateInfo.version) + ' <button class="rs-btn rs-btn-primary" id="rs-update-now" style="margin-left: 10px; padding: 2px 8px; font-size: 11px; font-weight: bold; cursor: pointer; border-radius: 4px;">Update Now</button> <span class="rs-update-close" id="rs-update-dismiss">x</span></div>';
     }
 
     document.body.innerHTML = `
@@ -788,6 +788,10 @@
       await risuai.pluginStorage.removeItem('risusummary:updateAvailable');
       var banner = document.getElementById('rs-update-banner');
       if (banner) banner.style.display = 'none';
+    });
+
+    document.getElementById('rs-update-now')?.addEventListener('click', async function() {
+      await performSelfUpdate();
     });
 
     // Auto toggle
@@ -1080,6 +1084,143 @@
       if (!raw) return null;
       return typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch (e) { return null; }
+  }
+
+  function parseHeaders(jsCode) {
+    var lines = jsCode.split('\n');
+    var name = '';
+    var displayName = '';
+    var version = '';
+    var updateURL = '';
+    var description = '';
+    var apiVersion = '2.1';
+    var args = {};
+    var realArg = {};
+    var argMeta = {};
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.indexOf('//@name') === 0) {
+        name = line.slice(7).trim();
+      } else if (line.indexOf('//@display-name') === 0) {
+        displayName = line.slice(15).trim();
+      } else if (line.indexOf('//@version') === 0) {
+        version = line.slice(10).trim();
+      } else if (line.indexOf('//@update-url') === 0) {
+        updateURL = line.slice(13).trim();
+      } else if (line.indexOf('//@description') === 0) {
+        description = line.slice(14).trim();
+      } else if (line.indexOf('//@api') === 0) {
+        apiVersion = line.slice(6).trim();
+      } else if (line.indexOf('//@arg') === 0 || line.indexOf('//@risu-arg') === 0) {
+        var parts = line.split(/\s+/);
+        if (parts.length >= 3) {
+          var argName = parts[1];
+          var argType = parts[2];
+          args[argName] = argType;
+          if (argType === 'int') {
+            realArg[argName] = 0;
+          } else {
+            realArg[argName] = '';
+          }
+          if (parts.length > 3) {
+            var meta = {};
+            var metaStr = parts.slice(3).join(' ').replace(
+              /{{(.+?)(::?(.+?))?}}/g,
+              function(a, g1, g2, g3) {
+                meta[g1] = g3 || '1';
+                return '';
+              }
+            ).trim();
+            if (metaStr) {
+              meta['description'] = metaStr;
+            }
+            argMeta[argName] = meta;
+          }
+        }
+      }
+    }
+    return {
+      name: name,
+      displayName: displayName,
+      versionOfPlugin: version,
+      updateURL: updateURL,
+      version: apiVersion === '3.0' ? '3.0' : (apiVersion === '2.0' ? 2 : '2.1'),
+      arguments: args,
+      realArg: realArg,
+      argMeta: argMeta
+    };
+  }
+
+  async function performSelfUpdate() {
+    try {
+      showStatus('Downloading update...');
+      var resp = await risuai.nativeFetch(UPDATE_URL, { method: 'GET' });
+      if (!resp.ok) {
+        showStatus('Failed to download update file.', true);
+        return;
+      }
+      var jsCode = await resp.text();
+      var meta = parseHeaders(jsCode);
+      if (!meta.name || meta.name !== 'risusummary') {
+        showStatus('Invalid update file contents.', true);
+        return;
+      }
+
+      var db = await risuai.getDatabase();
+      if (!db || !db.plugins) {
+        showStatus('Failed to retrieve RisuAI plugins database.', true);
+        return;
+      }
+
+      var index = -1;
+      for (var i = 0; i < db.plugins.length; i++) {
+        if (db.plugins[i].name === 'risusummary') {
+          index = i;
+          break;
+        }
+      }
+
+      if (index === -1) {
+        showStatus('Plugin not found in database.', true);
+        return;
+      }
+
+      var oldPlugin = db.plugins[index];
+      var newRealArg = Object.assign({}, meta.realArg, oldPlugin.realArg);
+
+      var updatedPlugin = {
+        name: meta.name,
+        script: jsCode,
+        realArg: newRealArg,
+        arguments: meta.arguments,
+        displayName: meta.displayName || oldPlugin.displayName,
+        version: meta.version,
+        customLink: oldPlugin.customLink || [],
+        argMeta: meta.argMeta,
+        versionOfPlugin: meta.versionOfPlugin,
+        updateURL: meta.updateURL,
+        allowedIPC: oldPlugin.allowedIPC || [],
+        enabled: true
+      };
+
+      db.plugins[index] = updatedPlugin;
+      await risuai.setDatabaseLite(db);
+      await risuai.pluginStorage.removeItem('risusummary:updateAvailable');
+
+      showStatus('Update successful! Reloading plugin...');
+      setTimeout(async function() {
+        if (typeof risuai.loadPlugins === 'function') {
+          await risuai.loadPlugins();
+        }
+        await renderSettingsUI();
+        showStatus('Updated to v' + meta.versionOfPlugin + ' successfully.');
+      }, 1000);
+
+    } catch (e) {
+      console.error('[RisuSummary] Self-update failed:', e);
+      showStatus('Update failed: ' + (e.message || e), true);
+    }
   }
 
   // ───── Update Toast (on main page) ─────
