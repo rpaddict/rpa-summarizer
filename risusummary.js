@@ -1,14 +1,15 @@
 //@name risusummary
 //@display-name RisuSummary
 //@api 3.0
-//@version 1.2.0
+//@version 1.2.2
 //@update-url https://raw.githubusercontent.com/rpaddict/ezSumMari/main/risusummary.js
 //@description Auto-summarize AI responses using a secondary model to save context tokens. Full preset system, advanced API parameters, customizable prompts, lorebook & previous message context.
 
 (async () => {
-  const APP_VERSION = '1.2.0';
+  const APP_VERSION = '1.2.2';
   const STORAGE_KEY = 'risusummary:settings';
   const PRESETS_KEY = 'risusummary:presets';
+  const UPDATE_URL = 'https://raw.githubusercontent.com/rpaddict/ezSumMari/main/risusummary.js';
 
   const SVG_ICON = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
@@ -69,6 +70,18 @@
 
   function cloneDeep(obj) {
     return JSON.parse(JSON.stringify(obj));
+  }
+
+  function compareVersions(a, b) {
+    var pa = (a || '0.0.0').replace(/[^0-9.]/g, '').split('.').map(Number);
+    var pb = (b || '0.0.0').replace(/[^0-9.]/g, '').split('.').map(Number);
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+      var na = pa[i] || 0;
+      var nb = pb[i] || 0;
+      if (nb > na) return -1;
+      if (na > nb) return 1;
+    }
+    return 0;
   }
 
   function stripMarkers(content) {
@@ -495,6 +508,12 @@
     var isDark = darkSchemes.indexOf(colorScheme) !== -1;
     var themeClass = isDark ? 'dark' : '';
 
+    var updateInfo = await getUpdateInfo();
+    var updateBannerHtml = '';
+    if (updateInfo) {
+      updateBannerHtml = '<div class="rs-update-banner" id="rs-update-banner">UPDATE: v' + escapeHtml(updateInfo.current) + ' -> v' + escapeHtml(updateInfo.version) + ' <span class="rs-update-close" id="rs-update-dismiss">x</span></div>';
+    }
+
     document.body.innerHTML = `
       <style>
         * { box-sizing: border-box; }
@@ -567,6 +586,11 @@
         .dark .rs-import-item:hover { background: #1e212b; }
         .dark .rs-import-item-name { color: #e1e4e8; }
         .dark .rs-import-item-meta { color: #959da5; }
+
+        .rs-update-banner { margin: 12px 20px 0; padding: 10px 14px; background: #fef3c7; border: 1px solid #f59e0b; border-left: 3px solid #f59e0b; border-radius: 8px; font-size: 13px; font-weight: 600; color: #92400e; display: flex; align-items: center; gap: 8px; }
+        .rs-update-banner .rs-update-close { margin-left: auto; cursor: pointer; padding: 2px 6px; opacity: 0.6; }
+        .rs-update-banner .rs-update-close:hover { opacity: 1; }
+        .dark .rs-update-banner { background: #422006; border-color: #d97706; color: #fde68a; }
       </style>
 
       <div class="rs-container ${themeClass}">
@@ -576,7 +600,7 @@
         </div>
 
         <div class="rs-scrollable">
-
+          ${updateBannerHtml}
           <!-- Auto toggle -->
           <div class="rs-section">
             <label class="rs-checkbox rs-checkbox-large">
@@ -759,6 +783,12 @@
     // ───── Event listeners ─────
 
     document.getElementById('rs-close')?.addEventListener('click', function() { risuai.hideContainer(); });
+
+    document.getElementById('rs-update-dismiss')?.addEventListener('click', async function() {
+      await risuai.pluginStorage.removeItem('risusummary:updateAvailable');
+      var banner = document.getElementById('rs-update-banner');
+      if (banner) banner.style.display = 'none';
+    });
 
     // Auto toggle
     document.getElementById('rs-enabled')?.addEventListener('change', async function(e) {
@@ -1000,6 +1030,146 @@
     });
   }
 
+  // ───── Auto-Update Check ─────
+
+  var updateCheckCooldown = 3600000;
+
+  async function checkForUpdate() {
+    if (!UPDATE_URL) return;
+    try {
+      var lastCheck = await risuai.pluginStorage.getItem('risusummary:lastUpdateCheck');
+      if (lastCheck) {
+        var elapsed = Date.now() - parseInt(lastCheck, 10);
+        if (elapsed < updateCheckCooldown) return;
+      }
+
+      var resp = await risuai.nativeFetch(UPDATE_URL, {
+        method: 'GET',
+        headers: { 'Range': 'bytes=0-512' }
+      });
+
+      if (!resp.ok) return;
+      var text = await resp.text();
+      var match = text.match(/\/\/@version\s+([^\r\n]+)/);
+      if (!match) return;
+      var remoteVersion = match[1].trim();
+
+      if (compareVersions(APP_VERSION, remoteVersion) < 0) {
+        console.log('[RisuSummary] ========================================');
+        console.log('[RisuSummary] UPDATE AVAILABLE: v' + APP_VERSION + ' -> v' + remoteVersion);
+        console.log('[RisuSummary] ========================================');
+        await risuai.pluginStorage.setItem('risusummary:updateAvailable', JSON.stringify({
+          version: remoteVersion,
+          current: APP_VERSION,
+          checkedAt: Date.now()
+        }));
+        showUpdateToast(APP_VERSION, remoteVersion);
+      } else {
+        await risuai.pluginStorage.removeItem('risusummary:updateAvailable');
+      }
+
+      await risuai.pluginStorage.setItem('risusummary:lastUpdateCheck', String(Date.now()));
+    } catch (e) {
+      console.log('[RisuSummary] Update check failed:', e.message || e);
+    }
+  }
+
+  async function getUpdateInfo() {
+    try {
+      var raw = await risuai.pluginStorage.getItem('risusummary:updateAvailable');
+      if (!raw) return null;
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) { return null; }
+  }
+
+  // ───── Update Toast (on main page) ─────
+
+  async function showUpdateToast(currentVersion, newVersion) {
+    try {
+      var rootDoc = await risuai.getRootDocument();
+      if (!rootDoc) return;
+
+      var existing = await rootDoc.querySelector('[x-rs-update-toast]');
+      if (existing) try { await existing.remove(); } catch (e) {}
+
+      var body = await rootDoc.querySelector('body');
+      if (!body) return;
+
+      var colorScheme = 'light';
+      try { colorScheme = await risuai.getColorScheme(); } catch (_) {}
+      var darkSchemes = ['dark', 'cherry', 'galaxy', 'realblack', 'monokai-black'];
+      var isDark = darkSchemes.indexOf(colorScheme) !== -1;
+
+      var bg = isDark ? '#1f2937' : '#ffffff';
+      var border = isDark ? '#374151' : '#d0d7de';
+      var accent = '#f59e0b';
+      var text = isDark ? '#e5e7eb' : '#24292e';
+      var subtext = isDark ? '#9ca3af' : '#6a737d';
+      var versionColor = isDark ? '#6ee7b7' : '#15803d';
+      var shadow = 'rgba(0,0,0,0.4)';
+
+      var div = await rootDoc.createElement('div');
+      await div.setAttribute('x-rs-update-toast', '1');
+
+      var styles = {
+        position: 'fixed',
+        bottom: '20px',
+        right: '20px',
+        zIndex: '99999',
+        background: bg,
+        border: '1px solid ' + border,
+        borderLeft: '3px solid ' + accent,
+        borderRadius: '10px',
+        padding: '12px 14px',
+        maxWidth: '360px',
+        minWidth: '260px',
+        boxShadow: '0 8px 24px ' + shadow,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        pointerEvents: 'auto',
+        opacity: '0',
+        transform: 'translateY(12px)',
+        transition: 'opacity 0.3s ease, transform 0.3s ease'
+      };
+      for (var key in styles) {
+        try { await div.setStyle(key, styles[key]); } catch (e) {}
+      }
+
+      await div.setInnerHTML(
+        '<div style="display:flex;align-items:flex-start;gap:10px">' +
+        '<div style="font-size:18px;line-height:1;flex-shrink:0">@</div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13px;font-weight:600;color:' + accent + '">RisuSummary Update Available</div>' +
+        '<div style="font-size:11px;color:' + subtext + ';margin-top:2px">' +
+        'v' + escapeHtml(currentVersion) + '  <span style="color:' + versionColor + '">v' + escapeHtml(newVersion) + '</span>' +
+        '</div>' +
+        '<div style="font-size:10px;color:' + subtext + ';margin-top:4px">Open Plugin Settings to update. This toast will disappear in 12s.</div>' +
+        '</div></div>'
+      );
+
+      await body.appendChild(div);
+
+      setTimeout(async function() {
+        try {
+          await div.setStyle('opacity', '1');
+          await div.setStyle('transform', 'translateY(0)');
+        } catch (e) {}
+      }, 50);
+
+      setTimeout(async function() {
+        try {
+          await div.setStyle('opacity', '0');
+          await div.setStyle('transform', 'translateY(12px)');
+          setTimeout(async function() {
+            try { await div.remove(); } catch (e) {}
+          }, 350);
+        } catch (e) {}
+      }, 12000);
+
+    } catch (e) {
+      console.log('[RisuSummary] Toast failed:', e.message || e);
+    }
+  }
+
   // ───── Init ─────
 
   try {
@@ -1030,6 +1200,12 @@
     await risuai.onUnload(function() {
       console.log('[RisuSummary] Unloaded');
     });
+
+    // Request mainDom permission for update toasts (user will be prompted once)
+    try { await risuai.requestPluginPermission('mainDom', 'periodically'); } catch (e) {}
+
+    // Auto-update check (delayed, with cooldown)
+    setTimeout(function() { checkForUpdate(); }, 5000);
 
     console.log('[RisuSummary] v' + APP_VERSION + ' initialized');
     console.log('[RisuSummary] Auto summarization: ' + (State.enabled ? 'ON' : 'OFF'));
