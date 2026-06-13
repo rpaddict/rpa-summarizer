@@ -1,12 +1,11 @@
 //@name risusummary
 //@display-name RisuSummary
 //@api 3.0
-//@version 1.2.2
-//@update-url https://raw.githubusercontent.com/rpaddict/ezSumMari/main/risusummary.js
+//@version 1.2.1
 //@description Auto-summarize AI responses using a secondary model to save context tokens. Full preset system, advanced API parameters, customizable prompts, lorebook & previous message context.
 
 (async () => {
-  const APP_VERSION = '1.2.2';
+  const APP_VERSION = '1.2.1';
   const STORAGE_KEY = 'risusummary:settings';
   const PRESETS_KEY = 'risusummary:presets';
   const UPDATE_URL = 'https://raw.githubusercontent.com/rpaddict/ezSumMari/main/risusummary.js';
