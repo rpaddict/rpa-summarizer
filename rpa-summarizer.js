@@ -492,6 +492,16 @@
     } catch (e) {}
     await risuai.showContainer('fullscreen');
     await renderSettingsUI();
+
+    // Bypasses update cooldown and triggers background check immediately upon opening UI
+    checkForUpdate(true).then(async function() {
+      var updateInfo = await getUpdateInfo();
+      if (updateInfo) {
+        await renderSettingsUI();
+      }
+    }).catch(function(err) {
+      console.log('[RPA Summarizer] Background update check failed:', err);
+    });
   }
 
   async function renderSettingsUI() {
@@ -1095,13 +1105,13 @@
 
   // ───── Auto-Update Check ─────
 
-  var updateCheckCooldown = 3600000;
+  var updateCheckCooldown = 300000; // 5분
 
-  async function checkForUpdate() {
+  async function checkForUpdate(force) {
     if (!UPDATE_URL) return;
     try {
       var lastCheck = await risuai.pluginStorage.getItem('rpa-summarizer:lastUpdateCheck');
-      if (lastCheck && APP_VERSION !== '1.2.0' && APP_VERSION !== '1.2.2') {
+      if (!force && lastCheck && APP_VERSION !== '1.2.0' && APP_VERSION !== '1.2.2') {
         var elapsed = Date.now() - parseInt(lastCheck, 10);
         if (elapsed < updateCheckCooldown) return;
       }
@@ -1416,8 +1426,13 @@
     // Request mainDom permission for update toasts (user will be prompted once)
     try { await risuai.requestPluginPermission('mainDom', 'periodically'); } catch (e) {}
 
-    // Auto-update check (delayed, with cooldown)
-    setTimeout(function() { checkForUpdate(); }, 5000);
+    // Auto-update check (5s initial delay, then repeats every 5 minutes)
+    setTimeout(function() {
+      checkForUpdate();
+      setInterval(function() {
+        checkForUpdate();
+      }, 300000);
+    }, 5000);
 
     console.log('[RPA Summarizer] v' + APP_VERSION + ' initialized');
     console.log('[RPA Summarizer] Auto summarization: ' + (State.enabled ? 'ON' : 'OFF'));
